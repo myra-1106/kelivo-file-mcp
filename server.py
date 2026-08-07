@@ -10,6 +10,7 @@ from starlette.requests import Request
 from starlette.responses import FileResponse, JSONResponse, Response
 
 from file_store import FileStore, FileStoreError, StoredFile
+from memory_store import MemoryStore, MemoryStoreError
 
 
 def _env_int(name: str, default: int) -> int:
@@ -38,6 +39,11 @@ store = FileStore(
     base_url=BASE_URL,
     ttl_seconds=TTL_SECONDS,
     max_content_bytes=MAX_CONTENT_BYTES,
+)
+
+memory_store = MemoryStore(
+    os.getenv("SUPABASE_URL"),
+    os.getenv("SUPABASE_SECRET_KEY"),
 )
 
 mcp = MCPServer("Kelivo File Maker")
@@ -104,6 +110,88 @@ def create_file(filename: str, content: str) -> str:
         return _error(exc)
 
 
+
+def _memory_error(exc: Exception) -> str:
+    return f"记忆操作失败：{exc}"
+
+
+def _memory_rows(rows: list[dict]) -> str:
+    if not rows:
+        return "没有找到长期记忆"
+    lines = [f"找到 {len(rows)} 条长期记忆："]
+    for index, row in enumerate(rows, start=1):
+        category = str(row.get("category", ""))
+        key = str(row.get("key", ""))
+        content = str(row.get("content", ""))
+        keywords = str(row.get("keywords", ""))
+        updated_at = str(row.get("updated_at", ""))
+        lines.append(f"[{index}] {category}/{key}")
+        lines.append(f"内容：{content}")
+        if keywords:
+            lines.append(f"关键词：{keywords}")
+        if updated_at:
+            lines.append(f"更新时间：{updated_at}")
+    return "\n".join(lines)
+
+
+@mcp.tool()
+def memory_search(query: str, category: str = "", limit: int = 8) -> str:
+    """按当前任务检索相关长期记忆。category 可留空，limit 默认 8。"""
+    try:
+        return _memory_rows(memory_store.search(query, category, limit))
+    except MemoryStoreError as exc:
+        return _memory_error(exc)
+
+
+@mcp.tool()
+def memory_get_all(category: str = "") -> str:
+    """读取全部长期记忆，或读取指定 category 下的全部记忆。"""
+    try:
+        return _memory_rows(memory_store.get_all(category))
+    except MemoryStoreError as exc:
+        return _memory_error(exc)
+
+
+@mcp.tool()
+def memory_add(category: str, key: str, content: str, keywords: str = "") -> str:
+    """保存明确的长期规则；相同 category/key 已存在时自动覆盖旧内容。"""
+    try:
+        row = memory_store.add(category, key, content, keywords)
+    except MemoryStoreError as exc:
+        return _memory_error(exc)
+    return (
+        "长期记忆已保存\n"
+        f"标识：{row.get('category', category)}/{row.get('key', key)}\n"
+        f"内容：{row.get('content', content)}"
+    )
+
+
+@mcp.tool()
+def memory_update(category: str, key: str, content: str, keywords: str = "") -> str:
+    """显式更新一条已存在的长期记忆。"""
+    try:
+        row = memory_store.update(category, key, content, keywords)
+    except MemoryStoreError as exc:
+        return _memory_error(exc)
+    return (
+        "长期记忆已更新\n"
+        f"标识：{row.get('category', category)}/{row.get('key', key)}\n"
+        f"内容：{row.get('content', content)}"
+    )
+
+
+@mcp.tool()
+def memory_delete(category: str, key: str) -> str:
+    """删除用户明确要求忘记的一条长期记忆。"""
+    try:
+        deleted = memory_store.delete(category, key)
+    except MemoryStoreError as exc:
+        return _memory_error(exc)
+    if not deleted:
+        return f"没有找到要删除的长期记忆：{category}/{key}"
+    return f"长期记忆已删除：{category}/{key}"
+
+
 @mcp.custom_route("/health", methods=["GET"])
 async def health(request: Request) -> Response:
     return JSONResponse(
@@ -113,6 +201,7 @@ async def health(request: Request) -> Response:
             "mcp": "/mcp",
             "ttl_hours": TTL_SECONDS // 3600,
             "max_content_bytes": MAX_CONTENT_BYTES,
+            "memory_configured": memory_store.configured,
         }
     )
 
